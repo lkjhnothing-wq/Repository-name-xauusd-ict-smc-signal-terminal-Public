@@ -1,8 +1,24 @@
-export function resample(candles,ms){const m=new Map();for(const x of candles){const k=Math.floor(x.t/ms)*ms;const o=m.get(k);if(!o)m.set(k,{t:k,o:x.o,h:x.h,l:x.l,c:x.c});else{o.h=Math.max(o.h,x.h);o.l=Math.min(o.l,x.l);o.c=x.c}}return[...m.values()].sort((a,b)=>a.t-b.t)}
-export function dailyBias(d){if(d.length<4)return'NEUTRAL';const a=d.at(-2),b=d.at(-3);const dir=x=>x.c>x.o?'BULLISH':x.c<x.o?'BEARISH':'NEUTRAL';return dir(a)===dir(b)?dir(a):'NEUTRAL'}
-export function findOrderBlocks(h,bias){const out=[];for(let i=1;i<h.length;i++){const p=h[i-1],c=h[i],range=c.h-c.l,body=Math.abs(c.c-c.o);if(!range||body/range<.7)continue;if(bias==='BULLISH'&&p.c<p.o&&c.c>c.o)out.push({id:'B'+p.t,t:p.t,side:'BUY',low:p.l,high:p.h,status:'FRESH'});if(bias==='BEARISH'&&p.c>p.o&&c.c<c.o)out.push({id:'S'+p.t,t:p.t,side:'SELL',low:p.l,high:p.h,status:'FRESH'})}return out}
-function inZone(c,z){return c.l<=z.high&&c.h>=z.low}
-function strong(c,side){const r=c.h-c.l,b=Math.abs(c.c-c.o);return r>0&&b/r>=.7&&(side==='BUY'?c.c>c.o:c.c<c.o)}
-function reaction(c,side){return side==='BUY'?c.c>c.o:c.c<c.o}
-export function evaluateCoreA({m5,h1,d1,now=Date.now(),history=[]}){const completed1D=d1.filter(x=>x.t+86400000<=now);const completed1H=h1.filter(x=>x.t+3600000<=now);const completed5M=m5.filter(x=>x.t+300000<=now);const price=completed5M.at(-1)?.c;if(!price)return{signal:'WAIT',reason:'NO COMPLETED 5M CANDLE'};const bias=dailyBias(completed1D);if(bias==='NEUTRAL')return{signal:'WAIT',reason:'1D BIAS NEUTRAL',bias,price};const obs=findOrderBlocks(completed1H,bias);if(!obs.length)return{signal:'WAIT',reason:'NO QUALIFYING 1H ORDER BLOCK',bias,price};const today=new Date(completed5M.at(-1).t).toISOString().slice(0,10);const todays=history.filter(x=>new Date(x.ts).toISOString().slice(0,10)===today).length;if(todays>=2)return{signal:'WAIT',reason:'MAXIMUM 2 TRADES REACHED TODAY',bias,price,tradesToday:todays};for(const ob of obs){const start=completed5M.findIndex(x=>x.t>=ob.t+3600000);if(start<0)continue;let tap=-1;for(let i=start;i<completed5M.length;i++)if(inZone(completed5M[i],ob)){tap=i;break}if(tap<0)continue;let react=-1,disp=-1;for(let i=tap+1;i<completed5M.length;i++){if(react<0&&reaction(completed5M[i],ob.side)){react=i;continue}if(react>=0&&strong(completed5M[i],ob.side)){disp=i;break}}if(disp<0)continue;const entryCandle=completed5M[disp+1];if(!entryCandle)continue;const entry=entryCandle.o;const sl=ob.side==='BUY'?entry-10:entry+10;const tp1=ob.side==='BUY'?entry+10:entry-10;const key=ob.id+':'+entryCandle.t;if(history.some(x=>x.key===key))continue;return{signal:ob.side,reason:'CORE A FULLY CONFIRMED',bias,price,ob,tapTime:completed5M[tap].t,reactionTime:completed5M[react].t,displacementTime:completed5M[disp].t,entryTime:entryCandle.t,entry,sl,tp1,rr:1,key,tradesToday:todays}}
-return{signal:'WAIT',reason:'WAITING FOR FIRST TAP → REACTION → 70% DISPLACEMENT',bias,price,ob:obs.at(-1),tradesToday:todays}}
+function swings(c,n=3){const hi=[],lo=[];for(let i=n;i<c.length-n;i++){let H=true,L=true;for(let j=1;j<=n;j++){if(c[i].h<=c[i-j].h||c[i].h<=c[i+j].h)H=false;if(c[i].l>=c[i-j].l||c[i].l>=c[i+j].l)L=false}if(H)hi.push(i);if(L)lo.push(i)}return{hi,lo}}
+function session(t){const h=new Date(t).getUTCHours();return(h>=7&&h<=16)}
+function dailyBias(d){if(d.length<3)return'NEUTRAL';const a=d.at(-2),b=d.at(-3);if(a.c>a.o&&b.c>b.o)return'BULLISH';if(a.c<a.o&&b.c<b.o)return'BEARISH';return'NEUTRAL'}
+function rr(entry,sl,tp){return Math.abs(tp-entry)/Math.abs(entry-sl)}
+export function evaluateCoreA({m5,h1,d1,now=Date.now(),history=[]}){const c=m5.filter(x=>x.t+300000<=now);if(c.length<30)return{signal:'WAIT',reason:'WAITING FOR MARKET DATA'};const price=c.at(-1).c,bias=dailyBias(d1.filter(x=>x.t+86400000<=now));const {hi,lo}=swings(c,3);const lookback=80;
+// Find the most recent liquidity sweep, then confirm market structure shift and retracement.
+for(let s=c.length-2;s>=Math.max(10,c.length-lookback);s--){const beforeHi=hi.filter(i=>i<s).at(-1),beforeLo=lo.filter(i=>i<s).at(-1);if(beforeHi===undefined||beforeLo===undefined)continue;const x=c[s];
+ // Bullish: sweep sell-side liquidity, close back above swept low, then break prior swing high.
+ if(x.l<c[beforeLo].l&&x.c>c[beforeLo].l&&bias!=='BEARISH'){
+   let mss=-1;for(let i=s+1;i<c.length;i++)if(c[i].c>c[beforeHi].h){mss=i;break}if(mss<0)continue;
+   const entry=(x.l+c[mss].h)/2,sl=x.l-0.5,risk=entry-sl,tp1=entry+risk*2,tp2=entry+risk*3;
+   const touched=c.slice(mss+1).some(z=>z.l<=entry&&z.h>=entry);const key=`BUY:${x.t}:${c[mss].t}`;
+   if(touched&&c.at(-1).t-c[mss].t<21600000&&!history.some(z=>z.key===key))return{signal:'BUY',reason:'LIQUIDITY SWEEP + BULLISH MSS + 50% RETRACEMENT',bias,price,entry,sl,tp1,tp2,rr:2,risk,profit1:tp1-entry,profit2:tp2-entry,sweepTime:x.t,mssTime:c[mss].t,entryTime:c.at(-1).t,key,session:session(c.at(-1).t)?'LONDON/NY':'OFF SESSION'};
+   continue;
+ }
+ // Bearish: sweep buy-side liquidity, close back below swept high, then break prior swing low.
+ if(x.h>c[beforeHi].h&&x.c<c[beforeHi].h&&bias!=='BULLISH'){
+   let mss=-1;for(let i=s+1;i<c.length;i++)if(c[i].c<c[beforeLo].l){mss=i;break}if(mss<0)continue;
+   const entry=(x.h+c[mss].l)/2,sl=x.h+0.5,risk=sl-entry,tp1=entry-risk*2,tp2=entry-risk*3;
+   const touched=c.slice(mss+1).some(z=>z.l<=entry&&z.h>=entry);const key=`SELL:${x.t}:${c[mss].t}`;
+   if(touched&&c.at(-1).t-c[mss].t<21600000&&!history.some(z=>z.key===key))return{signal:'SELL',reason:'LIQUIDITY SWEEP + BEARISH MSS + 50% RETRACEMENT',bias,price,entry,sl,tp1,tp2,rr:2,risk,profit1:entry-tp1,profit2:entry-tp2,sweepTime:x.t,mssTime:c[mss].t,entryTime:c.at(-1).t,key,session:session(c.at(-1).t)?'LONDON/NY':'OFF SESSION'};
+ }
+}
+return{signal:'WAIT',reason:'WAITING FOR LIQUIDITY SWEEP → MSS → RETRACEMENT',bias,price,rr:2}}
