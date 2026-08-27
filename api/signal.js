@@ -1,5 +1,26 @@
 import {evaluateCoreA} from './coreA.js';
-const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-async function getOne(host,symbol,tf,range){const u=`https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${encodeURIComponent(tf)}&range=${encodeURIComponent(range)}&includePrePost=false`;const r=await fetch(u,{headers:{'User-Agent':'Mozilla/5.0','Accept':'application/json'},cache:'no-store'});if(!r.ok)throw Error(`${host} ${symbol} HTTP ${r.status}`);const j=await r.json(),q=j?.chart?.result?.[0],v=q?.indicators?.quote?.[0];const candles=(q?.timestamp||[]).map((t,i)=>({t:t*1000,o:v?.open?.[i],h:v?.high?.[i],l:v?.low?.[i],c:v?.close?.[i]})).filter(x=>[x.o,x.h,x.l,x.c].every(Number.isFinite));if(candles.length<20)throw Error(`${host} ${symbol} insufficient candles`);return candles}
-async function get(tf,range){const errors=[];for(const symbol of ['XAUUSD=X','GC=F'])for(const host of ['query1.finance.yahoo.com','query2.finance.yahoo.com']){try{return{candles:await getOne(host,symbol,tf,range),source:symbol==='XAUUSD=X'?'Yahoo Finance XAUUSD spot':'Yahoo Finance GC=F fallback',symbol}}catch(e){errors.push(e.message);await sleep(100)}}throw Error(errors.join(' | '))}
-export default async function handler(req,res){try{const [m5,h1,d1]=await Promise.all([get('5m','5d'),get('1h','1mo'),get('1d','1y')]);const history=[];const s=evaluateCoreA({m5:m5.candles,h1:h1.candles,d1:d1.candles,history});res.setHeader('Cache-Control','no-store, max-age=0');return res.status(200).json({source:m5.source,realData:true,...s})}catch(e){return res.status(503).json({error:'REAL_DATA_UNAVAILABLE',detail:e.message,signal:'WAIT'})}}
+
+async function getBars(symbol, interval, limit){
+  const u=`https://biquote.io/api/${encodeURIComponent(symbol)}/ohlc?interval=${encodeURIComponent(interval)}&limit=${limit}`;
+  const r=await fetch(u,{cache:'no-store',headers:{Accept:'application/json'}});
+  if(!r.ok)throw Error(`biquote ${symbol} ${interval} HTTP ${r.status}`);
+  const j=await r.json();
+  const bars=(j?.bars||[]).map(x=>({t:Date.parse(x.openTime),o:+x.open,h:+x.high,l:+x.low,c:+x.close})).filter(x=>[x.t,x.o,x.h,x.l,x.c].every(Number.isFinite)).reverse();
+  if(bars.length<30)throw Error(`biquote ${symbol} ${interval} insufficient candles`);
+  return bars;
+}
+
+export default async function handler(req,res){
+  try{
+    const [m5,h1,d1]=await Promise.all([
+      getBars('XAUUSD','5m',1000),
+      getBars('XAUUSD','1h',500),
+      getBars('XAUUSD','1d',500)
+    ]);
+    const s=evaluateCoreA({m5,h1,d1,history:[]});
+    res.setHeader('Cache-Control','no-store, max-age=0');
+    return res.status(200).json({source:'biquote.io XAUUSD',realData:true,...s,updated:new Date().toISOString()});
+  }catch(e){
+    return res.status(503).json({error:'REAL_DATA_UNAVAILABLE',detail:e?.message||'Live feed unavailable',signal:'WAIT'});
+  }
+}
